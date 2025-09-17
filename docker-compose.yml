@@ -1,0 +1,196 @@
+networks:
+  hive-net:
+
+services:
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop2.7.4-java8
+    container_name: namenode
+    environment:
+      - CLUSTER_NAME=test
+    volumes:
+      - hadoop_namenode:/hadoop/dfs/name
+    ports:
+      - "9871:50070"
+      - "8020:8020"
+    networks:
+      - hive-net
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "50070"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop2.7.4-java8
+    container_name: datanode
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+    volumes:
+      - hadoop_datanode:/hadoop/dfs/data
+    ports:
+      - "9876:50075"
+    depends_on:
+      namenode:
+        condition: service_healthy
+    networks:
+      - hive-net
+
+  resourcemanager:
+    image: bde2020/hadoop-resourcemanager:2.0.0-hadoop2.7.4-java8
+    container_name: resourcemanager
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+    ports:
+      - "8088:8088"
+    depends_on:
+      namenode:
+        condition: service_healthy
+    networks:
+      - hive-net
+
+  nodemanager:
+    image: bde2020/hadoop-nodemanager:2.0.0-hadoop2.7.4-java8
+    container_name: nodemanager
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+    ports:
+      - "8042:8042"
+    depends_on:
+      resourcemanager:
+        condition: service_started
+    networks:
+      - hive-net
+
+  historyserver:
+    image: bde2020/hadoop-historyserver:2.0.0-hadoop2.7.4-java8
+    container_name: historyserver
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+    ports:
+      - "8188:8188"
+    depends_on:
+      namenode:
+        condition: service_healthy
+    networks:
+      - hive-net
+
+  hive-metastore-postgresql:
+    image: postgres:13
+    container_name: hive-metastore-postgresql
+    environment:
+      - POSTGRES_DB=metastore
+      - POSTGRES_USER=hive
+      - POSTGRES_PASSWORD=hive
+    ports:
+      - "5432:5432"
+    volumes:
+      - metastore_db:/var/lib/postgresql/data
+    networks:
+      - hive-net
+
+  hive-metastore:
+    image: hive-with-postgres
+    container_name: hive-metastore
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+    command: /opt/hive/bin/hive --service metastore
+    ports:
+      - "9083:9083"
+    depends_on:
+      - hive-metastore-postgresql
+      - namenode
+    volumes:
+      - ./hive-site.xml:/opt/hive/conf/hive-site.xml
+    networks:
+      - hive-net
+    restart: always
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9083"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+
+  hive-server:
+    image: hive-with-postgres
+    container_name: hive-server
+    environment:
+      - HIVE_METASTORE_URI=thrift://hive-metastore:9083
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+      - SERVICE_NAME=hiveserver2
+    ports:
+      - "10000:10000"
+    depends_on:
+      hive-metastore:
+        condition: service_healthy
+    volumes:
+      - ./hive-site.xml:/opt/hive/conf/hive-site.xml
+    networks:
+      - hive-net
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "10000"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+
+  spark-master:
+    image: bde2020/spark-master:2.4.5-hadoop2.7
+    container_name: spark-master
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+      - PYTHONPATH=/scripts   
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+      - "8888:8888"   # 👈 aquí abrimos el puerto para Jupyter
+    volumes:
+      - ./jdbcs/mssql-jdbc-13.2.0.jre8.jar:/opt/spark/jars/mssql-jdbc-13.2.0.jre8.jar   # Driver SQL Server
+      - ./scripts:/scripts   #Carpeta de cripts
+    depends_on:
+      namenode:
+        condition: service_healthy
+    networks:
+      - hive-net
+
+  spark-worker-1:
+    image: bde2020/spark-worker:2.4.5-hadoop2.7
+    container_name: spark-worker-1
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - PYTHONPATH=/scripts
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./jdbcs/mssql-jdbc-13.2.0.jre8.jar:/opt/spark/jars/mssql-jdbc-13.2.0.jre8.jar   #  Driver SQL Server
+      - ./scripts:/scripts   # 
+    depends_on:
+      spark-master:
+        condition: service_started
+    networks:
+      - hive-net
+  jupyter:
+   build:
+    context: .
+    dockerfile: Dockerfile.jupyter
+   container_name: jupyter
+   environment:
+    - PYSPARK_PYTHON=python3
+    - PYTHONPATH=/scripts
+   volumes:
+    - ./scripts:/scripts
+    - ./hadoop_conf/core-site.xml:/etc/hadoop/conf/core-site.xml
+    - ./hadoop_conf/hdfs-site.xml:/etc/hadoop/conf/hdfs-site.xml
+    - ./credenciales/.env:/etc/credenciales/.env   # 🔒 credenciales seguras
+    - ./jdbcs/mssql-jdbc-13.2.0.jre8.jar:/opt/spark/jars/mssql-jdbc-13.2.0.jre8.jar 
+   ports:
+    - "8889:8888"
+   networks:
+    - hive-net
+
+
+
+
+volumes:
+  hadoop_namenode:
+  hadoop_datanode:
+  metastore_db:
